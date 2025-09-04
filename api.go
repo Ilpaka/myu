@@ -1,26 +1,18 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 )
 
-// App struct
-type App struct {
-	ctx context.Context
-}
-
-// NewApp creates a new App application struct
-func NewApp() *App {
-	return &App{}
-}
-
-// Message - доменная модель
 type Message struct {
 	ID        int    `json:"id"`
 	Text      string `json:"text"`
@@ -49,16 +41,33 @@ var (
 	nextMsgID  = 1
 )
 
-// startup is called when the app starts. The context is saved
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+func main() {
 	e := echo.New()
 
-	// Users
+	// Middleware для production
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+
+	// CORS - ВАЖНО для фронтенда
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOrigins: []string{"*"}, // В production лучше указать конкретные домены
+		AllowMethods: []string{echo.GET, echo.POST, echo.PUT, echo.DELETE, echo.PATCH},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
+	}))
+
+	// Health check
+	e.GET("/health", func(c echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]interface{}{
+			"status":   "ok",
+			"time":     time.Now().Format(time.RFC3339),
+			"users":    len(users),
+			"messages": len(messages),
+		})
+	})
+
+	// API endpoints
 	e.POST("/users", CreateUserHandler)
 	e.GET("/users", GetUsersHandler)
-
-	// Messages
 	e.GET("/messages", GetHandler)
 	e.POST("/messages", PostHandler)
 	e.PATCH("/messages/:id", PatchHandler)
@@ -66,19 +75,26 @@ func (a *App) startup(ctx context.Context) {
 	e.GET("/messages/user/:id", GetUserMessagesHandler)
 	e.PATCH("/messages/:id/read", MarkAsReadHandler)
 
-	// В dev-режиме можно добавить CORS при необходимости:
-	// e.Use(middleware.CORS())
+	// Graceful shutdown
+	go func() {
+		if err := e.Start(":8080"); err != nil && err != http.ErrServerClosed {
+			e.Logger.Fatal("Server error: ", err)
+		}
+	}()
 
-	e.Logger.Fatal(e.Start(":8080"))
+	fmt.Println("🚀 Messenger API запущен на порту 8080")
+	fmt.Println("📋 Health check: http://localhost:8080/health")
+
+	// Ожидаем сигнал завершения
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	<-quit
+
+	fmt.Println("🔄 Завершение сервера...")
+	e.Logger.Info("Server stopped")
 }
 
-// Greet returns a greeting for the given name
-func (a *App) Greet(name string) string {
-	return fmt.Sprintf("Hello %s, It's show time!", name)
-}
-
-// Handlers
-
+// Handlers - те же самые
 func CreateUserHandler(c echo.Context) error {
 	var person Person
 	if err := c.Bind(&person); err != nil || person.Name == "" {
@@ -90,7 +106,6 @@ func CreateUserHandler(c echo.Context) error {
 	person.ID = nextUserID
 	nextUserID++
 	users[person.ID] = person
-
 	return c.JSON(http.StatusOK, person)
 }
 
@@ -132,14 +147,53 @@ func PostHandler(c echo.Context) error {
 	nextMsgID++
 	msg.FromName = from.Name
 	msg.ToName = to.Name
-	msg.Timestamp = time.Now().Format(time.RFC3339)
+	msg.Timestamp = time.Now().Format("15:04:05")
 	msg.IsRead = false
 
 	messages[msg.ID] = msg
-
 	return c.JSON(http.StatusOK, msg)
 }
 
+func GetUserMessagesHandler(c echo.Context) error {
+	idParam := c.Param("id")
+	uid, err := strconv.Atoi(idParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, Response{
+			Status:  "Error",
+			Message: "Invalid user id",
+		})
+	}
+	res := make([]Message, 0)
+	for _, m := range messages {
+		if m.ToID == uid {
+			res = append(res, m)
+		}
+	}
+	return c.JSON(http.StatusOK, res)
+}
+
+func MarkAsReadHandler(c echo.Context) error {
+	idParam := c.Param("id")
+	msgID, err := strconv.Atoi(idParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, Response{
+			Status:  "Error",
+			Message: "Invalid message ID",
+		})
+	}
+	msg, ok := messages[msgID]
+	if !ok {
+		return c.JSON(http.StatusNotFound, Response{
+			Status:  "Error",
+			Message: "Message not found",
+		})
+	}
+	msg.IsRead = true
+	messages[msgID] = msg
+	return c.JSON(http.StatusOK, msg)
+}
+
+// Остальные handlers (PatchHandler, DeleteHandler) - аналогично
 func PatchHandler(c echo.Context) error {
 	idParam := c.Param("id")
 	id, err := strconv.Atoi(idParam)
@@ -192,43 +246,4 @@ func DeleteHandler(c echo.Context) error {
 	}
 	delete(messages, id)
 	return c.NoContent(http.StatusNoContent)
-}
-
-func GetUserMessagesHandler(c echo.Context) error {
-	idParam := c.Param("id")
-	uid, err := strconv.Atoi(idParam)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{
-			Status:  "Error",
-			Message: "Invalid user id",
-		})
-	}
-	res := make([]Message, 0)
-	for _, m := range messages {
-		if m.ToID == uid { // только входящие
-			res = append(res, m)
-		}
-	}
-	return c.JSON(http.StatusOK, res)
-}
-
-func MarkAsReadHandler(c echo.Context) error {
-	idParam := c.Param("id")
-	msgID, err := strconv.Atoi(idParam)
-	if err != nil {
-		return c.JSON(http.StatusBadRequest, Response{
-			Status:  "Error",
-			Message: "Invalid message ID",
-		})
-	}
-	msg, ok := messages[msgID]
-	if !ok {
-		return c.JSON(http.StatusNotFound, Response{
-			Status:  "Error",
-			Message: "Message not found",
-		})
-	}
-	msg.IsRead = true
-	messages[msgID] = msg
-	return c.JSON(http.StatusOK, msg)
 }
