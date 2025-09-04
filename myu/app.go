@@ -113,6 +113,32 @@ func GetUserMessagesHandler(c echo.Context) error {
 	return c.JSON(http.StatusOK, &msgSLice)
 }
 
+func MarkAsReadHandler(c echo.Context) error {
+	idParam := c.Param("id")
+	msgID, err := strconv.Atoi(idParam)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, Response{
+			Status:  "Error",
+			Message: "Invalid message ID",
+		})
+	}
+
+	message, exists := messages[msgID]
+	if !exists {
+		return c.JSON(http.StatusNotFound, Response{
+			Status:  "Error",
+			Message: "Message not found",
+		})
+	}
+	message.IsRead = true
+	messages[msgID] = message
+
+	return c.JSON(http.StatusOK, Response{
+		Status:  "Success",
+		Message: "Message marked as read",
+	})
+}
+
 func GetHandler(c echo.Context) error {
 	// if r.Method == http.MethodGet {
 	// 	fmt.Fprint(w, "Counter = ", counter)
